@@ -1,4 +1,4 @@
-# youtube-2-mp3-rust
+# Youtube to MP3 in Rust
 A program for downloading the audio of youtube videos in an mp3 format.
 
 Paste a YouTube link into the window and the app shows the video's thumbnail,
