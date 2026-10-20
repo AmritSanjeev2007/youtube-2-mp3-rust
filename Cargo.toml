@@ -7,4 +7,6 @@ edition = "2024"
 eframe = "0.37"
 egui_extras = { version = "0.37", features = ["http", "image"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# Renders the SVG window icon; the icon has no text or embedded images.
+resvg = { version = "0.48.1", default-features = false }
 serde_json = "1"

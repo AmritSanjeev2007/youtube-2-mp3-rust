@@ -277,13 +277,49 @@ impl eframe::App for App {
     }
 }
 
+/// The app logo, built into the program.
+const ICON_SVG: &[u8] = include_bytes!("../assets/icon.svg");
+
+/// Renders the SVG logo into the RGBA pixels the window icon needs.
+fn load_icon(size: u32) -> Option<egui::IconData> {
+    use resvg::{tiny_skia, usvg};
+
+    let tree = usvg::Tree::from_data(ICON_SVG, &usvg::Options::default()).ok()?;
+    let mut pixmap = tiny_skia::Pixmap::new(size, size)?;
+    let scale = size as f32 / tree.size().width().max(tree.size().height());
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+
+    // tiny-skia stores premultiplied alpha; the window icon expects straight alpha.
+    let rgba = pixmap
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect();
+    Some(egui::IconData {
+        rgba,
+        width: size,
+        height: size,
+    })
+}
+
 /// Opens the window and runs until it is closed.
 pub fn run() -> eframe::Result {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("YouTube to MP3")
+        .with_inner_size([640.0, 440.0])
+        .with_min_inner_size([480.0, 360.0]);
+    if let Some(icon) = load_icon(256) {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("YouTube to MP3")
-            .with_inner_size([640.0, 440.0])
-            .with_min_inner_size([480.0, 360.0]),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
@@ -295,4 +331,16 @@ pub fn run() -> eframe::Result {
             Ok(Box::new(App::default()))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn icon_renders() {
+        let icon = super::load_icon(64).expect("icon.svg should render");
+        assert_eq!(icon.rgba.len(), 64 * 64 * 4);
+        // The centre of the logo is the opaque play triangle.
+        let centre = (32 * 64 + 32) * 4;
+        assert_eq!(icon.rgba[centre + 3], 255);
+    }
 }
