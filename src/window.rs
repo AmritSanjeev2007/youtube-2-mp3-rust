@@ -1,12 +1,17 @@
-//! The GUI window: a link box, an output folder box and a Download button.
+//! The GUI window: a link box with a video preview, an output folder box
+//! and a Download button.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::downloader;
+use crate::downloader::{self, VideoInfo};
+
+/// How long to wait after the link stops changing before fetching its info.
+const FETCH_DELAY: Duration = Duration::from_millis(600);
 
 /// Messages sent from the download thread back to the GUI.
 enum Update {
@@ -14,12 +19,22 @@ enum Update {
     Done(Result<(), String>),
 }
 
+/// The video info fetched for a link, tagged with that link.
+type InfoResult = (String, Result<VideoInfo, String>);
+
 pub struct App {
     url: String,
     output_dir: String,
     status: String,
     downloading: bool,
     rx: Option<Receiver<Update>>,
+
+    /// The link the preview shows (or is being fetched for).
+    info_url: String,
+    info: Option<VideoInfo>,
+    info_rx: Option<Receiver<InfoResult>>,
+    /// When the link was last edited, while a fetch is waiting on it.
+    last_edit: Option<Instant>,
 }
 
 impl Default for App {
@@ -30,6 +45,10 @@ impl Default for App {
             status: "Paste a YouTube link and press Download.".to_owned(),
             downloading: false,
             rx: None,
+            info_url: String::new(),
+            info: None,
+            info_rx: None,
+            last_edit: None,
         }
     }
 }
@@ -40,6 +59,29 @@ fn default_output_dir() -> PathBuf {
         Some(home) => PathBuf::from(home).join("Downloads"),
         None => PathBuf::from("."),
     }
+}
+
+/// Formats seconds as m:ss, or h:mm:ss for an hour or more.
+fn format_duration(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// Formats a number with thousands separators, e.g. 1234567 -> 1,234,567.
+fn format_count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 impl App {
@@ -82,12 +124,110 @@ impl App {
             self.rx = None;
         }
     }
+
+    /// Called when the link text changes: drops the old preview and
+    /// schedules a fetch for the new link.
+    fn link_changed(&mut self) {
+        let url = self.url.trim();
+        if url == self.info_url {
+            return;
+        }
+        self.info = None;
+        self.info_rx = None;
+        self.info_url.clear();
+        self.last_edit = (!url.is_empty()).then(Instant::now);
+    }
+
+    /// Starts fetching the preview once the link has been still for a moment,
+    /// and picks up the result when it arrives.
+    fn poll_info(&mut self, ctx: &egui::Context) {
+        if let Some(edited) = self.last_edit {
+            let waited = edited.elapsed();
+            if waited < FETCH_DELAY {
+                ctx.request_repaint_after(FETCH_DELAY - waited);
+            } else {
+                self.last_edit = None;
+                self.start_fetch(ctx);
+            }
+        }
+
+        let Some(rx) = &self.info_rx else { return };
+        if let Ok((url, result)) = rx.try_recv() {
+            self.info_rx = None;
+            if url != self.info_url {
+                return;
+            }
+            match result {
+                Ok(info) => self.info = Some(info),
+                Err(err) => self.status = format!("Couldn't load video info: {err}"),
+            }
+        }
+    }
+
+    fn start_fetch(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let url = self.url.trim().to_owned();
+        let ctx = ctx.clone();
+
+        self.info_url = url.clone();
+        self.info_rx = Some(rx);
+
+        thread::spawn(move || {
+            let result = downloader::fetch_info(&url);
+            let _ = tx.send((url, result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn show_preview(&self, ui: &mut egui::Ui) {
+        if self.info_rx.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading video info...");
+            });
+            return;
+        }
+        let Some(info) = &self.info else { return };
+
+        ui.horizontal_top(|ui| {
+            if let Some(thumbnail) = &info.thumbnail {
+                ui.add(
+                    egui::Image::new(thumbnail.as_str())
+                        .max_width(240.0)
+                        .corner_radius(4.0),
+                );
+            }
+            ui.vertical(|ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&info.title).strong().size(16.0)).wrap(),
+                );
+                if let Some(channel) = &info.channel {
+                    ui.label(channel);
+                }
+                ui.add_space(4.0);
+                egui::Grid::new("video_stats").num_columns(2).show(ui, |ui| {
+                    let mut row = |name: &str, value: Option<String>| {
+                        if let Some(value) = value {
+                            ui.weak(name);
+                            ui.label(value);
+                            ui.end_row();
+                        }
+                    };
+                    row("Length", info.duration.map(format_duration));
+                    row("Views", info.view_count.map(format_count));
+                    row("Likes", info.like_count.map(format_count));
+                    row("Uploaded", info.upload_date.clone());
+                });
+            });
+        });
+    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.poll_download();
         let ctx = ui.ctx().clone();
+        self.poll_download();
+        self.poll_info(&ctx);
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("YouTube to MP3");
@@ -100,6 +240,13 @@ impl eframe::App for App {
                     .hint_text("https://www.youtube.com/watch?v=...")
                     .desired_width(f32::INFINITY),
             );
+            if url_box.changed() {
+                self.link_changed();
+            }
+
+            ui.add_space(4.0);
+            self.show_preview(ui);
+            ui.add_space(4.0);
 
             ui.label("Save to folder:");
             ui.add_enabled(
@@ -135,12 +282,17 @@ pub fn run() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("YouTube to MP3")
-            .with_inner_size([520.0, 260.0]),
+            .with_inner_size([640.0, 440.0])
+            .with_min_inner_size([480.0, 360.0]),
         ..Default::default()
     };
     eframe::run_native(
         "YouTube to MP3",
         options,
-        Box::new(|_cc| Ok(Box::new(App::default()))),
+        Box::new(|cc| {
+            // Lets egui::Image load the thumbnail straight from its URL.
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(App::default()))
+        }),
     )
 }
