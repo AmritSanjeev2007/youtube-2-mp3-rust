@@ -104,6 +104,13 @@ pub fn download_mp3(
     let mut cmd = yt_dlp();
     cmd.args(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
         .args(["--no-playlist", "--newline"])
+        // Tag the MP3 with the title and artist, and use the thumbnail,
+        // cropped from 16:9 to a centred square, as its cover art.
+        .args(["--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg"])
+        .args([
+            "--ppa",
+            r#"ThumbnailsConvertor+FFmpeg_o:-c:v mjpeg -vf "crop='min(iw,ih)':'min(iw,ih)'""#,
+        ])
         .arg("-P")
         .arg(output_dir)
         .args(["-o", "%(title)s.%(ext)s", "--", url])
